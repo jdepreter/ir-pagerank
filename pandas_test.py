@@ -2,22 +2,23 @@ import pandas
 import numpy as np
 
 
-links = pandas.read_table("./data/ClueWeb09_WG_50m.graph-txt", sep="\n", header=None, skip_blank_lines=False, nrows=20, names=["out"])
-links["index"] = np.arange(links.shape[0])
-links["out"] = links["out"].apply(lambda node: [int(i) for i in str(node).split(" ")] if str(node) != "nan" else [])
+links = pandas.read_table("./data/ClueWeb09_WG_50m.graph-txt", sep="\n", header=None, skip_blank_lines=False, names=["outgoing_link"])
+links["node_index"] = np.arange(links.shape[0])
+links["outgoing_link"] = links["outgoing_link"].apply(lambda node: [int(i) for i in str(node).split(" ")] if str(node) != "nan" else [])
 
-count = int(links["out"][0][0])
+count = int(links["outgoing_link"][0][0])
 links = links.iloc[1:] # remove first row 
 
-links = links.assign(rank=1.0/count) # sets default chance
+# links = links.assign(rank=1.0/count) # sets default chance
 
 print('---')
 
-# links = links.explode("out")
-# test = links.groupby(by="out").agg({"rank": "sum"})
+links = links.explode("outgoing_link")
+test = links.groupby(by="outgoing_link").aggregate(lambda x: tuple(x))
 
 
-print(links.head())
+
+print(test.head(20))
 
 
 
