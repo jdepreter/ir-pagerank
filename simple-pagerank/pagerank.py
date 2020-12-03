@@ -3,7 +3,7 @@ import findspark
 findspark.init()
 
 import pyspark
-from pyspark import SparkContext, SparkConf
+from pyspark import SparkContext, SparkConf, SQLContext
 from pyspark.sql import SparkSession
 
 
@@ -40,4 +40,4 @@ for _ in range(ITERATIONS):
     ranks = links.join(ranks).flatMap(lambda x : [(i, float(x[1][1])/len(x[1][0])) for i in x[1][0]]).reduceByKey(lambda x,y: x+y)
 # print(ranks.sortBy(lambda rank: rank[1]).collect())
 print('---')
-print(ranks.take(100))
+# print(ranks.take(100))
