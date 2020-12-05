@@ -12,7 +12,7 @@ links = group_edges.map(lambda x: (x[0], [i[1] for i in x[1]]))
 ranks = links.map(lambda x: (x[0], 1.0/am_nodes))
 
 
-print(links_ranks.take(10))
+print(ranks.take(10))
 
 ITERATIONS = 10
 for _ in range(ITERATIONS):
