@@ -72,7 +72,7 @@ while error > epsilon:
     ranks = new_ranks
     iteration += 1
     
-ranks = ranks.sortBy(lambda node: node[1])
+ranks = ranks.sortBy(lambda node: -node[1])
 print(ranks.take(10))
 
 df = ranks.toDF()
