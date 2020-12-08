@@ -57,6 +57,7 @@ iteration = 0
 error = 1
 
 while error > epsilon:
+    print(f"Iteration {iteration} with error {error}")
     new_ranks = links.join(ranks).flatMap(lambda x : [(i, (1-alpha) * float(x[1][1])/len(x[1][0])) for i in x[1][0]])
     # print(new_ranks.take(10))
     
@@ -65,10 +66,11 @@ while error > epsilon:
     
     new_ranks = new_ranks.reduceByKey(lambda x,y: x+y)
     error_rdd = new_ranks.union(ranks).reduceByKey(lambda x, y: abs(x-y)).map(lambda x: x[1])
-    print(error_rdd.take(10))
+    # print(error_rdd.take(10))
     error = error_rdd.reduce(max)
-    print(error)
+    # print(error)
     ranks = new_ranks
+    iteration += 1
     
 ranks = ranks.sortBy(lambda node: node[1])
 print(ranks.take(10))
