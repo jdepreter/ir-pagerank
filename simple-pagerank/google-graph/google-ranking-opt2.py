@@ -84,7 +84,8 @@ while error > epsilon:
     # print(error)
     ranks = new_ranks
     iteration += 1
-    
+
+ranks = ranks.union(const_nodes_rank)
 ranks = ranks.sortBy(lambda node: -node[1])
 print(ranks.take(10))
 
