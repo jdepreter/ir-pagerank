@@ -36,7 +36,7 @@ group_edges = edges.groupBy(lambda x: x[0])
 links = group_edges.map(lambda x: (x[0], [i[1] for i in x[1]]))
 
 incoming = links.map(lambda x: x[0])
-outgoing = links.flatMap(lambda x: [i for i in x[1]])
+outgoing = links.flatMap(lambda x: [i for i in x[1]]).distinct()
 
 
 
@@ -60,10 +60,17 @@ base_ranks_no_outgoing = no_outgoing.map(lambda x: (x, alpha / am_nodes))
 iteration = 0
 error = 1
 
+# links = links.map(lambda node: (node[0], node[1], len(node[1])))
+# links = links.flatMap(lambda node: [(out, (node[0], node[2]) ) for out in node[1]])
+# print(links.take(10))
+# links = incoming.map(lambda x: (x, 0)).join(links).
+# print(links.take(10))
+# quit()
+
 while error > epsilon:
     new_ranks = links.join(ranks_incoming).flatMap(lambda x : [(i, (1-alpha) * float(x[1][1])/len(x[1][0])) for i in x[1][0]])
     # print(new_ranks.count())
-    new_ranks = incoming.map(lambda x: (x, 0)).join(new_ranks).map(lambda x: (x[0], x[1][1]))
+    # new_ranks = incoming.map(lambda x: (x, 0)).join(new_ranks).map(lambda x: (x[0], x[1][1]))
     # print(new_ranks.take(10))
     # print(new_ranks.count())
     
@@ -71,6 +78,8 @@ while error > epsilon:
     # print(new_ranks.take(10))
     
     new_ranks = new_ranks.reduceByKey(lambda x,y: x+y)
+    new_ranks = incoming.map(lambda x: (x, 0)).join(new_ranks).map(lambda x: (x[0], x[1][1]))
+
     error_rdd = new_ranks.union(ranks_incoming).reduceByKey(lambda x, y: abs(x-y)).map(lambda x: x[1])
     # print(error_rdd.take(10))
     error = error_rdd.reduce(max)
