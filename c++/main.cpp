@@ -10,6 +10,7 @@ double start_rank = 1.0 / total_nodes;
 
 double alpha = 0.15;
 double beta  = 1 - alpha;
+double eps = 0.000001;
 
 double base_rank = alpha / total_nodes;
 
@@ -42,7 +43,7 @@ void readfile(string filepath, std::map<int, std::vector<int>>& links, std::map<
     
 }
 
-void iterate(std::map<int, double>& ranks, std::map<int, std::vector<int>>& links) {
+double iterate(std::map<int, double>& ranks, std::map<int, std::vector<int>>& links) {
 
     map<int, double> new_ranks;
     for (map<int, vector<int>>::iterator it = links.begin(); it != links.end(); it++)
@@ -60,7 +61,15 @@ void iterate(std::map<int, double>& ranks, std::map<int, std::vector<int>>& link
     {
         new_ranks[it->first] += base_rank;
     }
+    double error = 0;
+
+    for (map<int, double>::iterator it = ranks.begin(); it != ranks.end(); it++)
+    {
+        error = max(error, abs(ranks[it->first] - new_ranks[it->first]));
+    }
+    
     ranks = new_ranks;
+    return error;
     
 }
 
@@ -79,18 +88,24 @@ int main() {
     // cout << endl;
     
     // cout << ranks.size() << endl;
-    for (int i = 0; i < 1; i++)
+    int i = 0;
+    while (true)
     {
         std::cout << "Start Iteration " << i << endl;
-        iterate(ranks, links);
-        std::cout << "End Iteration " << i << endl;
+        double error = iterate(ranks, links);
+        std::cout << "End Iteration " << i << " with error " << error << endl;
+        if (error < eps) {
+            std::cout << "Convergence achieved" << endl;
+            break;
+        }
+        i++;
     }
     
 
-    cout << ranks.size() << endl;
+    // cout << ranks.size() << endl;
     cout << "Writing file" << endl;
     ofstream out;
-    out.open("out1.csv");
+    out.open("out.csv");
     for (map<int, double>::iterator it = ranks.begin(); it != ranks.end(); it++)
     {
         out << it->first << ";" << it->second << endl;
