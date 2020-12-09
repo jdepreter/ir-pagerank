@@ -178,7 +178,7 @@ int32_t main(int argc, char *argv[])
     }
 
     cout << "Done Reading" << endl;
-    return 1;
+    // return 1;
 
     // for (size_t i = 0; i < links[0].size(); i++)
     // {
