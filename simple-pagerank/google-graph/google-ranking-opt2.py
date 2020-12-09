@@ -35,8 +35,8 @@ edges = edges.filter(lambda edge: edge[0] != "#").map(lambda edge: tuple(edge.sp
 group_edges = edges.groupBy(lambda x: x[0])
 links = group_edges.map(lambda x: (x[0], [i[1] for i in x[1]]))
 
-incoming = links.map(lambda x: x[0])
-outgoing = links.flatMap(lambda x: [i for i in x[1]])
+incoming = links.map(lambda x: x[0]).distinct()
+outgoing = links.flatMap(lambda x: [i for i in x[1]]).distinct()
 
 # Nodes with no incoming edges, always will have base chance (alpha/n)
 const_nodes = incoming.subtract(outgoing)
