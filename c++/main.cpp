@@ -5,6 +5,8 @@
 
 using namespace std;
 
+int ITERATION = -1;
+
 int32_t total_nodes;
 double start_rank;
 double alpha = 0.15;
@@ -155,7 +157,7 @@ double random_walk(std::map<int32_t, double> &ranks, std::map<int32_t, std::vect
                 first = false;
 
                 // random double between [0.0, 1.0[
-                double r = static_cast<double>(rand()-1) / static_cast<double>(RAND_MAX);
+                double r = static_cast<double>(rand() - 1) / static_cast<double>(RAND_MAX);
                 if (r < alpha)
                 {
                     break;
@@ -186,10 +188,10 @@ double random_walk(std::map<int32_t, double> &ranks, std::map<int32_t, std::vect
         // Compute distribution
         visits[it->first] = (iterations_per + visits[it->first]) / (double)total_visits;
 
-        if (current_iteration > 0) {
+        if (current_iteration > 0)
+        {
             visits[it->first] = (ranks[it->first] * current_iteration + visits[it->first]) / (double)(current_iteration + 1);
         }
-        
 
         error = max(error, abs(visits[it->first] - ranks[it->first]));
     }
@@ -219,41 +221,54 @@ double random_walk(std::map<int32_t, double> &ranks, std::map<int32_t, std::vect
 
 int32_t main(int argc, char *argv[])
 {
+    srand(time(NULL));
+
     string filepath = "../data/web-Google.txt";
     string filepath_out = "out.csv";
-    string format = "google";
-
-    // cout << argc << endl;
+    string format = "google";   // google or graph-txt
+    string algorithm = "power"; // power or random
 
     // Read cli args
     switch (argc)
     {
     case 2:
+        if (argv[1] == "help")
+        {
+            cout << "./a.out [inputfile] [format] [outputfile] [algorithm] [alpha] [max iterations] " << endl;
+            cout << "inputfile: relative / absolute path to graph file" << endl;
+            cout << "format: google or graph-txt" << endl;
+            cout << "outputfile: relative / absolute path to output file (optional, default: out.csv)" << endl;
+            cout << "algorithm: power or random (optional, default: power)" << endl;
+            cout << "alpha (optional, default: 0.15)" << endl;
+            cout << "max iterations (optional, default: -1 = unlimited)" << endl;
+            cout << "note: arguments are position dependent" << endl;
+            return 0;
+        }
         cerr << "Missing format (options: 'google', 'graph-txt')" << endl;
         cerr << "Example: ./a.out " << argv[1] << " google" << endl;
         return 1;
         break;
-
-    case 3:
-        filepath = argv[1];
-        format = argv[2];
-        cout << "File: " << filepath << endl;
-        cout << "Format: " << format << endl;
-        cout << "File Out: " << filepath_out << endl;
-        break;
-
+    case 7:
+        ITERATION = stoi(argv[6]);
+    case 6:
+        alpha = stod(argv[5]);
+    case 5:
+        algorithm = argv[4];
     case 4:
-        filepath = argv[1];
-        format = argv[2];
         filepath_out = argv[3];
-        cout << "File: " << filepath << endl;
-        cout << "Format: " << format << endl;
-        cout << "File Out: " << filepath_out << endl;
+    case 3:
+        format = argv[2];
+        filepath = argv[1];
         break;
-
     default:
         break;
     }
+    cout << "File: " << filepath << endl;
+    cout << "Format: " << format << endl;
+    cout << "File Out: " << filepath_out << endl;
+    cout << "Algorithm: " << algorithm << endl;
+    cout << "Alpha: " << alpha << endl;
+    if (ITERATION > -1) cout << "Max iterations: " << ITERATION << endl;
 
     // Initialize datastructures
     std::map<int32_t, vector<int32_t>> links;
@@ -289,10 +304,24 @@ int32_t main(int argc, char *argv[])
 
     // Start iterating
     int32_t i = 0;
+    double error;
     while (true)
     {
         std::cout << "Start Iteration " << i << endl;
-        double error = random_walk(ranks, links, i);
+        if (algorithm == "power")
+        {
+            error = iterate(ranks, links);
+        }
+        else if (algorithm == "random")
+        {
+            error = random_walk(ranks, links, i);
+        }
+        else {
+            cerr << "Algorithm: "  << algorithm << " is not supported" << endl;
+            cerr << "Supported algorithms are: 'power', 'random'" << endl;
+            return 1;
+        }
+        
         std::cout << "End Iteration " << i << " with error " << error << endl;
         if (error < eps)
         {
@@ -300,6 +329,7 @@ int32_t main(int argc, char *argv[])
             break;
         }
         i++;
+        if (ITERATION == i) break;   // DEBUG Functionality 
     }
 
     // cout << ranks.size() << endl;
