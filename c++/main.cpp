@@ -15,6 +15,8 @@ double eps = 0.000001;
 
 double base_rank;
 
+int CAP = 50000000;
+
 void readfile(string filepath, std::map<int32_t, std::vector<int32_t>> &links, std::map<int32_t, double> &ranks)
 {
     ifstream myfile;
@@ -84,27 +86,36 @@ void readBigFile(string filepath, std::map<int32_t, std::vector<int>> &links, st
             continue;
         }
 
-        ranks[node_nr] = start_rank;
+        if (node_nr > CAP) break;
+
+        ranks[node_nr] = 0;
 
         while ((pos = line.find(delimiter)) != std::string::npos)
         {
             token = line.substr(0, pos);
             // cout << token << endl;
             int32_t node2 = std::stoi(token);
-
-            ranks[node2] = start_rank;
-            links[node_nr].push_back(node2);
-
+            if (node2 < CAP) {
+                ranks[node2] = 0;
+                links[node_nr].push_back(node2);
+            }
             line.erase(0, pos + delimiter.length());
         }
         token = line;
         int32_t node2 = std::stoi(token);
-        ranks[node2] = start_rank;
+        ranks[node2] = 0;
         links[node_nr].push_back(node2);
         vector<int32_t>(links[node_nr]).swap(links[node_nr]); // save some memory
         node_nr++;
     }
     total_nodes = ranks.size();
+    start_rank = 1.0 / total_nodes;
+    base_rank = alpha / total_nodes;
+
+    for (map<int32_t, double>::iterator it = ranks.begin(); it != ranks.end(); it++)
+    {
+        it->second = start_rank;
+    }
     myfile.close();
 }
 
