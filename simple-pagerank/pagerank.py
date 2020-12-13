@@ -6,6 +6,11 @@ import pyspark
 from pyspark import SparkContext, SparkConf, SQLContext
 from pyspark.sql import SparkSession
 
+inputfile = "../data/ClueWeb09_WG_50m_numbered.graph-txt"
+alpha = float(0.15)    # Teleportation probability
+epsilon = 0.000001      # 10^-6
+outputdir = "big0.15.csv"
+
 config = pyspark.SparkConf().setAll([('spark.executor.memory', '8g'), ('spark.executor.cores', '3'), ('spark.cores.max', '3'), ('spark.driver.memory','8g')]) \
     .setAppName('appName').setMaster('local[*]')
 
@@ -16,15 +21,11 @@ spark = SparkSession(sc)
 am_nodes = 428136613
 
 # Adjacency list
-links = sc.textFile('../data/ClueWeb09_WG_50m_numbered.graph-txt')
+links = sc.textFile(inputfile)
 links = links.map(lambda node: (node.split(".")[0], (node.split(".")[1].split(' ') if node.split(".")[1] != '' else [])))   # [ (source, [destinations]), ... ] 
 links = links.filter(lambda node: node[0] != '-1')
 
 ranks = links.map(lambda node: (node[0], 1.0 / am_nodes))
-
-alpha = float(0.15)    # Teleportation probability
-
-epsilon = 0.000001 # 10^-6
 
 base_ranks = links.map(lambda x: (x[0], alpha / am_nodes))
 
@@ -53,4 +54,4 @@ ranks = ranks.sortBy(lambda node: -node[1])
 print(ranks.take(10))
 
 df = ranks.toDF()
-df.repartition(1).write.csv('big0.15.csv')
+df.repartition(1).write.csv(outputdir)
