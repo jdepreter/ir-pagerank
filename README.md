@@ -1,5 +1,7 @@
 # ir-pagerank
 
+For simplicity, create a folder named 'data' in the root of the git repo and add the datasets in that folder. 
+
 ## Pyspark
 Make sure you have the following installed: 
 - Spark
