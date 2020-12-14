@@ -1,0 +1,868 @@
+\documentclass{article}
+\usepackage[utf8]{inputenc}
+\usepackage{listings}
+\usepackage{comment}
+\usepackage[
+backend=biber,
+style=alphabetic,
+sorting=ynt
+]{biblatex}
+\usepackage{algorithm2e}
+\usepackage{float}
+\addbibresource{bibliography.bib}
+
+\usepackage{color, colortbl}
+\definecolor{yellow}{rgb}{1,1,0}
+
+\usepackage{hyperref}
+
+\title{Information Retrieval:\\ Assignment 2}
+\author{Jolan Depreter \cr Lander De Roeck }
+\date{November 2020}
+
+\begin{document}
+
+\maketitle
+% Ideas
+% node count optimazition dont calc nodes with no outgoing 
+% 5105039 vs 4779314   
+
+
+% idea, skip nodes with no incoming (only outgoing) ==> always same value (encode chances in base_ranks)
+% idea, error = 0, yeet
+
+\tableofcontents
+\pagebreak
+
+\section{Introduction}
+Pageranking was the first algorithm used by Google to rank web pages. With the exponential growth of the web since then there is a need for more efficient implementations of the algorithm, to keep up with the ever expanding web. In this report we will look at possible ways to improve upon the basic pagerank algorithm. We will implement the mapreduce pageranking algorithm and will try to improve upon it. For the assignment we made use of the pyspark library and both the Google and ClueWeb data sets.
+The code discussed in this report is public on Github and can be found \href{https://github.com/jdepreter/ir-pagerank}{here}:
+\url{https://github.com/jdepreter/ir-pagerank}.
+
+\section{Pageranking}
+Pageranking is a method developed to order the web pages on the Internet according to importance, it models the likeliness someone gets to a page through following random hyperlinks. It builds on the underlying logic that an important site will receive more references compared to other less important sites. 
+
+The algorithm is a link analysis algorithm, it assumes web pages as nodes and hyperlinks as edges in the graph. Pageranking can be implemented in two ways, algebraically and iteratively. The iterative approach is also called the power iterative method or just simply the power method. Since the algebraic method relies on the adjacency matrix, it is often preferred to use the iterative for big data sets, as the adjacency matrix grows quadratically.
+
+The algorithm can be used to order search results from a query in a more reliable way, as the rank only depends on references on other sites. Which means site owners can't artificially increase their own rank on their site alone. They can create reference farms, the importance of the site however determines the weight of the reference, so doing this is pointless if the sites themselves have a low rank.
+
+
+\section{Graph Clustering}
+The original idea we had was trying to split the graph into ``clustered'' subgraphs. Then compute the pagerank in each of these subgraphs. Finally computing the pagerank between these subgraphs.
+
+To cluster a webgraph we looked at several possible methods. One of the problems is that we don't know the amount of clusters present in the dataset. This means that something like k-nearest neighbour will not work. A very promising clustering algorithm is Density-Based Spatial Clustering of Applications with Noise (DBSCAN). There we are not required to specify the amount of clusters.
+
+Our next problem is creating to correct input to start clustering. This proved to be quite the challenge. We either need a two dimensional representation of the graph, where each node is represented by a coordinate. Alternatively we can provide a distance matrix. Since we will need a distance matrix to assign coordinates to nodes, we wanted to use a distance matrix. 
+
+Computing a distance matrix for such a large data set requires a lot of memory and computation power because we get a 50 million $\times$ 50 million matrix. 
+
+At this point, it became clear that trying to cluster the data would be almost as expensive as running pagerank without any optimizations. We also considered clustering after pagerank computation, but that would require a functioning and fast pagerank algorithm. So we switched our focus to that.
+
+Clustering using pagerank has already been done successfully by other people \cite{hajij2020pagerank}. This works as follows. Select k center nodes $ c_i \:|\: i \in \{1, ..., k\}$ at random. Calculate the distance to every node from every center node $c_i$. Create subgraphs $G_i = (V_i, E_i) \subset G \:|\: i \in \{1, ..., k\}$ where $V_i$ contains the nodes closest to $c_i$ and $E_i \subseteq E$ the edges between nodes $ v \in V_i$. Now calculate pagerank for each subgraph and select $v \in V_i \:|\: PR(v) = max_{w \in V_i}(PR(w))$ the node with the highest pagerank in the subgraph, as the new center node $c_i$. Do this for every subgraph and repeat by calculating the new distances, new subgraphs, new pageranks and new centers until the center nodes do not change.  
+
+% So we switched our focus to trying to cluster and compute pagerank simultaneously. This has already been successfully done before by other people \cite{pagerank-cluster}. 
+
+
+\section{Mapreduce pageranking}
+We started out implementing the algorithm that is detailed in the lecture materials, this implementation of a mapreduce pageranking algorithm will be used as a baseline against which we will compare our optimisation attempts. We will be mainly focusing on the execution speed, but also on things like CPU time and memory/storage requirements.
+
+\RestyleAlgo{boxruled}
+\LinesNumbered
+\begin{algorithm}[ht]
+  \caption{Map algorithm\label{alg}}
+  \textbf{Flatmap}(key1: $d_i$, value1: (outlinks($d_i$), PR($d_i$)) \\ \Indp
+  \For{$d_j$ in outlinks($d_i$)}{
+    (key2: $d_j$, value2: $(1-\alpha)PR(d_i)/|outlinks(d_i)|$)
+  }
+\end{algorithm}
+
+\RestyleAlgo{boxruled}
+\LinesNumbered
+\begin{algorithm}[ht]
+  \caption{Reduce algorithm\label{alg2}}
+  \textbf{Reduce}(key2: $d_i$, value2: $PR_{1..m}(d_i)$) \\ \Indp 
+    PR($d_i$) := $(\alpha / n) + \sum_{j = 1..m}{PR_j(d_i)}$
+  
+\end{algorithm}
+In the algorithm we assume the chance $\alpha$, which corresponds to the chance to jump to a random node, and the total amount of nodes $n$. The algorithm will keep looping until the error is less than $\epsilon$ for every node.
+% Spark features a build in pageranking solution, this solution will also be used as a baseline to check our own implementations against.
+
+\subsection{Reading input}
+Both the datasets have another format, the goal is to create a sparse matrix in Spark. This matrix will be created as an RDD, which allows for mapreduce operations.
+For the clueweb dataset we create a RDD that contains all outgoing nodes as represented in the text file. Next we need the source node for these rows. This can be achieved with \emph{rdd.zipWithIndex()}. However this is quite an expensive operation as it cannot be parallelized, taking up at least a minute and a half. To get rid of this unnecessary computation time, we can modify the text file by adding the source node before its outgoing transitions using some linux commands.
+For the Google dataset, which had an edge on each line, we create an rdd containing both the incoming and outgoing nodes. After which we use a \emph{rdd.groupByKey()} to create an adjacency list.
+
+The simplest MapReduce implementation of pagerank could not run on our hardware for the ClueWeb dataset. It takes a very long time to compute the \emph{reduceByKey} and \emph{join} operations. We were only able to measure the length of he first iteration: 37 minutes. Afterwards it crashed due to not having enough disk space. 
+
+\subsection{Results}
+To keep consistency between the results, we used a single machine to produce all the results we used in the report. This machine used an Intel i7-4500U with 12GB of memory and running Ubuntu-18.04. This algorithm was only tested on the smaller dataset from google.
+% the bigger dataset from ClueWeb will be used to eventually run our best implementations and compare the scores.
+
+
+With the parameters: $\alpha = 0.15$ and $\epsilon = 10^{-6}$, this resulted in the values which can be seen in table \ref{tab:google_it_errors}.
+
+\begin{table}[H]
+    \centering
+    \begin{tabular}{ | c | r | }
+    \hline
+     \textbf{\# Iterations} & \textbf{Error ($\alpha = 0.15$)} \\ \hline
+     00     & 0.0012783562990714412     \\ \hline
+     01     & 0.0006503654092605307     \\ \hline
+     02     & 0.0005528164763902806     \\ \hline                      
+     03     & 0.00020954793813669163    \\ \hline                                   
+     04     & 0.0001531753262493103     \\ \hline                                    
+     05     & 0.00013020872666163265    \\ \hline                                 
+     ...    & ...                       \\ \hline
+     30     & 2.239097129663677e-06     \\ \hline
+     31     & 1.9032083582612121e-06    \\ \hline
+     32     & 1.6176237798950957e-06    \\ \hline
+     33     & 1.3749630060204984e-06    \\ \hline
+     34     & 1.168646786823982e-06     \\ \hline
+     35     & 9.933376857865553e-07     \\ \hline
+    \end{tabular}
+    \caption{Iterations - error for each iteration}
+    \label{tab:google_it_errors}
+\end{table}
+
+As we can see, we need 36 iterations before the maximum error becomes smaller than $\epsilon$. The total excecution time was 34 min and 30.3 sec, which is a rather long time for this ``small" dataset.
+
+\subsection{Trying to optimize MapReduce}
+This was way too long for our liking so we started at which operations cost the most. The map and flatmap operations only take a few seconds each. The ReduceByKey operation takes up most of the time of an iteration. If we are able to make this operation smaller, we could possible lower the time. 
+
+Our first idea was to remove all nodes that do not have any outgoing nodes (sink nodes). We don't need to calculate their rank every iteration, since their rank is never used to compute another node's rank. We can calculate their ranks at the end. Unfortunately, to not calculate their ranks, we have to filter these nodes every iteration. It turns out that this is more costly than computing their ranks. The final time clocked in at 44 minutes and 57 seconds. This attempt is located at \textit{./pyspark/google-graph/google-ranking-opt1.py}.
+
+Our next attempt was to filter out nodes that are not visitable by any other node. The idea being that the score won't change in any iteration, so there is no point to keep computing these values. In a real context this would be sites that link to a lot of other sites, without ever being referenced themselves. Their score will always be equal to the teleportation chance. This did not add any extra operations to the iteration itself, and decreased the size of the ranking and links. It does however add some extra preprocessing calculations, to calculate these nodes and the ranks. While we expected this to perform very well, in practice it seemed to somehow be slower than the unmodified mapreduce algorithm, with the final time clocking in at 45 minutes and 50 seconds.
+This attempt is located at \textit{./pyspark/google-graph/google-ranking-opt2.py}.
+
+Both of our attempts didn't seem to actually improve the computation speed, hence we abandoned the map-reduce algorithm for now and decided to focus on other potential algorithms. 
+
+\section{C++ Implementation}
+The main advantage of using C++ is that it is precompiled and generally is much faster. The downside being that it will have to keep a lot of data in memory, especially for bigger datasets, as it does not have any libraries like spark (to our knowledge). Keeping it all in memory should be much faster however.
+
+We start by reading the input file. The webgraph is represented by a map with a node id as key and as value a vector of node ids, which correspond to the outgoing nodes. The node ranks will be kept in a separate second map. While reading the input file, we add every new unique node to this map and set its value to the base rank ($1.0 / node\_count$). This representation is almost equivalent to the sparse matrix representation. The main differences being that we do not store the degree for each node. We calculate it when needed. This reduces the memory overhead slightly.
+
+Now we can start calculating the pagerank for each of the nodes. We start by creating a new map new\_ranks that will contain the newly computed rank for each node. We can't edit the rank map directly because we need its old value to compute the new ranks. We loop over every key in the map and for each key we loop over its outgoing nodes. Each outgoing node's rank is increased by
+$$ (1-\alpha) \times PR(start\_node) / degree(start\_node) $$
+When this loop is finished the new ranks for each node will be equal to 
+$$ PR_{i+1}(node) = (1-\alpha) \times \sum_{s \in S(node)} \frac{PR_i(s)}{degree(s)}  $$
+with $S(node) =$ all nodes that link to $node$.\\
+Then we only need to add the random teleportation probability to each node. This is a simple for loop over every key and adding $ \frac{\alpha}{node\_count}$. Which finally gives us following formula.
+$$PR(node) = \frac{\alpha}{node\_count} + (1 - \alpha) \times \sum_{s \in S(node)} \frac{PR_i(s)}{degree(s)}$$
+
+Finally we need to compute the max difference for a node between ranks and new\_ranks to know when the ranking converges. This is a simple for loop.
+
+\subsection{Optimizations}
+When reading the big data set, we simply ignore nodes that do not have outgoing and incoming links. This is why, when running the C++ script, it will say there are only a total of 147.927.857 nodes instead of the expected 428.136.613. Since the removed nodes dont have any links associated with them, they will always score the lowest pagerank $ = \frac{\alpha}{total\_nodes}$. This does influence the score given to our nodes, because our baserank is equal to $ \frac{\alpha}{147.927.857} \neq \frac{\alpha}{428.136.613}$ but will not influence the relative rankings between nodes. This optimazation does not have any effect on the google dataset because they only provide nodes that have links associated with them.
+
+\subsection{Results}
+
+\begin{table}[H]
+    \centering
+    \begin{tabular}{ | c | r | r | r |}
+        \hline
+        \textbf{Iteration} & Error $(\alpha = 0.15)$ & Error $(\alpha = 0.10)$ & Error $(\alpha = 0.50)$ \\ \hline
+        0   & 0.001278360   & 0.001353550 & 0.000751974 \\ \hline
+        1   & 0.000650365   & 0.000729129 & 0.000225040 \\ \hline
+        2   & 0.000552816   & 0.000656223 & 0.000112521 \\ \hline \hline
+        7   & 9.40940e-05   & 0.000148645 & 1.34887e-06 \\ \hline
+        8   & 7.99883e-05   & 0.000133795 & 6.74507e-07 \\ \hline \hline
+       34   & 1.16865e-06   & 8.63990e-06 &             \\ \hline
+       35   & 9.93338e-07   & 7.77582e-06 &             \\ \hline \hline
+       54   &               & 1.04984e-06 &             \\ \hline
+       55   &               & 9.44847e-07 &             \\ \hline
+    \end{tabular}
+    \caption{Errors for Google dataset using different values for $\alpha$}
+    \label{tab:my_label}
+\end{table}
+We observe that when we lower the value of $\alpha$, the amount of iterations needed for convergence increases (when using the same $\epsilon$ value of $10^{-6}$). This can be attributed to the base teleportation chance ($\alpha$) being lower, which means this base chance accounts for a smaller amount compared to the computed ranks of the incoming edges. Because only these incoming ranks are changing in between iterations, they solely contribute to the error. Since the weight assigned to these ranks is now increased, the error will respectively increase too. This is consistent with the fact that for $\alpha = 0.50$ we need less iterations to converge.
+
+Let's take a look at the difference in pagerank. We take the top 10 nodes generated with $\alpha = 0.15$ and look at their new placement generated with $\alpha = 0.10$ and $\alpha = 0.50$ 
+\begin{table}[H]
+    \centering
+    \begin{tabular}{ | c | c | c | c |}
+        \hline
+        \textbf{Node id} & Rank $(\alpha = 0.15)$ & Rank $(\alpha = 0.10)$ & Rank $(\alpha = 0.50)$ \\ \hline
+        597621  & 1  & 2  & 3 \\ \hline
+        41909   & 2  & 1  & 7 \\ \hline
+        163075  & 3  & 4  & 1\\ \hline
+        537039  & 4  & 3  & 2 \\ \hline
+        384666  & 5  & 5  & 14 \\ \hline
+        504140  & 6  & 6  & 8 \\ \hline
+        486980  & 7  & 8  & 15 \\ \hline
+        605856  & 8  & 11 & 4\\ \hline
+        32163   & 9  & 7  & 11\\ \hline
+        558791  & 10 & 10 & 13  \\ \hline
+    \end{tabular}
+    \caption{Rankings Google Dataset top 10 ($\alpha = 0.15)$ compared to $0.10$ and $0.50$}
+    \label{tab:my_label}
+\end{table}
+Changing the value of $\alpha$ does change the placement of the nodes relative to each other. This could be because we do more iterations with a smaller $\alpha$. So let's compute the pagerank with $\alpha = 0.10$ but limit the amount of iterations to 36, which equals the amount for $\alpha = 0.15$.
+\begin{table}[H]
+    \centering
+    \begin{tabular}{ | c | c | c | c |}
+        \hline
+        \textbf{Node id} & Rank $(\alpha = 0.15)$ & Rank $(\alpha = 0.10)$ & Rank $(\alpha = 0.10)$, limited \\ \hline
+        597621  & 1  & 2  & 1 \\ \hline
+        41909   & 2  & 1  & 2 \\ \hline
+        163075  & 3  & 4  & 3\\ \hline
+        537039  & 4  & 3  & 4 \\ \hline
+        384666  & 5  & 5  & 5 \\ \hline
+        504140  & 6  & 6  & 6 \\ \hline
+        486980  & 7  & 8  & 7 \\ \hline
+        605856  & 8  & 11 & 8\\ \hline
+        32163   & 9  & 7  & 9\\ \hline
+        558791  & 10 & 10 & 10  \\ \hline
+    \end{tabular}
+    \caption{Rankings Google Dataset top 10 ($\alpha = 0.15)$ compared to $0.10$ and $0.10$ with limited amount of iterations}
+    \label{tab:my_label}
+\end{table}
+The top ten is now equal to the top ten for $\alpha = 0.15$. We expected the positions for all nodes to be equal. However when we check the first 100, number 91 and 92 have switched places. This is probably because of a difference in rounding errors since the actual pagerank scores do differ and may cause floating point errors. We can conclude that $\alpha$ itself does not directly influence the ordering of the pagerank, $\alpha$ influences the amount of iterations, which in turn influences the ordering.
+
+\subsection{Resource Usage}
+As predicted, the C++ implementation takes up way more memory compared to Spark. Spark does not load all data into memory at once, it reads the parts of disk when it needs them. Our C++ implementation stores a representation of the file into memory. When the system has enough memory this means a tremendous decrease in computation time for the pagerank however (like for the google webgraph). To calculate the entire ClueWeb dataset, this implementation uses a staggering 21.5GB of memory (peak memory usage). Note that the C++ implementation only utilises a single core, so it can't scale with more cores or be modified to be run in a distributive way. The results generated by the C++ power iteration and the PySpark mapreduce implementation is equivalent.
+
+\begin{table}[H]
+    \centering
+    \begin{tabular}{|c|c|c|}
+        \hline
+        $\alpha$ & PySpark & C++ \\ \hline
+        0.15 & 34m 30.03s & 7m 06.82s \\ \hline
+        0.10 & 1h 03m 07.46s & 10m 53.36s \\ \hline
+        0.50 & 7m 36.86s & 1m 57.64s \\ \hline
+    \end{tabular}
+    \caption{Power Iteration Timings (Google webgraph)}
+    \label{tab:timing}
+\end{table}
+
+% 0.15 ./a.out ../data/web-Google.txt google out0.15.csv  425.79s user 1.02s system 99% cpu 7:06.82 total 200MB
+
+% ./a.out ../data/web-Google.txt google out0.10.csv  652.37s user 0.98s system 99% cpu 10:53.36 total 200MB
+
+% ./a.out ../data/web-Google.txt google out0.50.csv  116.69s user 0.95s system 99% cpu 1:57.64 total
+
+%python3.7 google-ranking.py  9.48s user 4.21s system 0% cpu 1:03:07.46 total alpha .10
+
+% python3.7 google-ranking.py  1.10s user 0.42s system 0% cpu 7:36.86 total  alpha .5
+
+\section{Random walk interpretation}
+Instead of trying analytically compute the pagerank, we could also estimate by performing a simulation of a random walk. We start at each node and start walking randomly. The variable $\alpha$ will now not teleport us randomly but instead it will terminate our current walk. So we have $(1-\alpha)$ chance to go to one of the outgoing nodes. Of course if there aren't any outgoing nodes, we also terminate the walk. This algorithm is a Monte Carlo computation. 
+
+Convergence was defined by the maximum error between two iterations being less than $\epsilon$. We define one iteration as a single random walk for all the nodes. We need at least one iteration before we can really start measuring errors. However for consistency the first error will compare this random walk iteration with the starting ranks which are: 
+$$ PR_{start}(node) = 1.0 / node\_count $$
+
+After an iteration, the ranks computed in that random walk and the current ranks will be weighed and added. This will be our new pagerank. 
+$$ freq_i(node) = \frac{visits_i(node)}{total\_visits_i}$$
+$$ PR_0(node) = freq_0(node) $$
+
+$$ PR_{i+1}(node) = \frac{PR_i(node) \times i + freq_{i+1}(node)}{i+1}$$
+$visits_i(node) = $ amount of times the node is reached in all random walks for iteration $i$, this includes the one time the random walk starts at this node. 
+$total\_visits_i$ is the total amount of visits for iteration $i$.
+
+Because of the nature of Monte Carlo algorithms, the errors for each iteration will vary per run. This variation may cause the error to increase. However, we will always converge at some point, since the weight of $PR_i(node)$ will keep getting bigger and bigger. This causes the new frequencies to have less and less effect, which causes the error to keep going down. 
+
+The first error will always be the biggest. This is because the greatest error is caused by the pages with the highest page rank. Since these pageranks will already be estimated as being quite big, the difference between them and $PR_{start}$ will be quite large. 
+
+Note that our reader is not different from the Power Iteration method. Thus we also remove nodes that don't have any links associated with them. We don't use the a ``base rank'' here, but the total\_visits amount will differ. Because every node is supposed to be visited at least once, and we skip certain nodes. This will cause the total\_visists to be smaller. However the same logic applies here. Nodes without links, and thus without rank, simply live at the bottom of the pagerank. 
+
+\subsection{Advantages compared to  Power Iteration}
+When comparing the top results of both the power iteration and random walk algorithms, which can be seen in table \ref{tab:ranks}, we notice that the top results seem to overlap quite nicely.
+Both power iteration and random walk have very similar top tens after convergence. 
+First and second place have switched places but if we compare their scores, they are very close to each other in both algorithms, with only a difference of only $2 * 10^{-6}$ and $4 * 10^{-6}$ respectively.
+
+\begin{table}[h]
+    \centering
+    \begin{tabular}{ | p{2cm} | p{1cm} | p{1cm} | p{1cm} | p{1cm} | p{1cm} |}
+    \hline
+    \textbf{Node id} & PI (C) & RW (C) & PI (1) & RW (1) & RW (1) run 2 \\ \hline
+    597621  & 1     & 2     & 3     & 3     & 2     \\ \hline
+    41909   & 2     & 1     & 21    & 1     & 1     \\ \hline
+    163075  & 3     & 3     & 1     & 4     & 3     \\ \hline
+    537039  & 4     & 4     & 2     & 2     & 4     \\ \hline
+    384666  & 5     & 5     & 20    & 6     & 5     \\ \hline
+    504140  & 6     & 6     & 10    & 5     & 6     \\ \hline
+    486980  & 7     & 7     & 22    & 8     & 7     \\ \hline
+    605856  & 8     & 8     & 4     & 10    & 8    \\ \hline
+    32163   & 9     & 9     & 13    & 11    & 11    \\ \hline
+    558791  & 10    & 10    & 14    & 7     & 9     \\ \hline
+    \end{tabular}
+    \caption{Rankings - PI = Power Iteration, RW = Randow Walk, (C) after convergence, (1) using only one iteration.}
+    \label{tab:ranks}
+\end{table}
+
+The main advantage of the random walk interpretation is that we can quite reasonably estimate pagerank in a single iteration. Of course, this is much faster compared to computing the pagerank until convergence.  The top ten of `RW (1)' and `RW (1) run 2' stay relatively intact with only a few nodes shuffled compared to the others' top ten. While the first iteration of the power iteration algorithm has quite a few nodes missing from its top ten. Most notably, `41909', which ranks first in all random walks and second in the converged results of the power iteration method, but only ranks $21^{st}$ after a single iteration of the power algorithm. This makes running until convergence a requirement for the power iteration method.
+
+% especially for nodes with many incoming links
+
+Furthermore, the difference between successive iterations is way smaller for the first iterations of Random Walk. Further proving the point that a single iteration of Random Walk is already quite good as an estimation for the pagerank. This can be seen in table \ref{tab:error-diff}
+
+\begin{table}[H]
+    \centering
+    \begin{tabular}{ | p{3cm} | p{3cm} | p{3cm} |}
+        \hline
+        \textbf{Iteration} & Power Iteration \newline Error $(\alpha = 0.15)$ & Random Walk \newline Error $(\alpha = 0.15)$ \\ \hline
+        0 & 0.001278360 & 0.000927567 \\ \hline
+        1 & 0.000650365 & 2.29175e-05 \\ \hline
+        2 & 0.000552816 & 1.1396e-05 \\ \hline 
+    \end{tabular}
+    \caption{Error difference}
+    \label{tab:error-diff}
+\end{table}
+
+% FLOATING ERRORS
+An unexpected advantage of the random walk algorithm is that it is actually more accurate. When we calculate the sum of the ranks we should get a value of 1. However, when we calculate the sum for the power iteration, for both the PySpark and C++ implementation, we see that there are significant floating point errors. The sum is $\approx 0.69$, calculating the sum for the random walk algorithm gives us $ 1.0001 \approx 1 $.
+
+This is because the random walk uses an integer to store the amount of times a node is visited. It only uses a floating point division at the end. One time to calculate the frequency and another to add an iteration's result to the previous iterations. In contrast, the power iteration uses one floating point division for every outgoing node for every node. Even after just one iteration of power walk our sum is already $ \approx 0.86$.
+
+On bigger datasets, there is a clear time advantage for the random walk algorithm compared to the power iteration method. 
+\begin{table}[H]
+    \centering
+    \begin{tabular}{|c|c|c|}
+        \hline
+        & RW (C) $\alpha = 0.15$ & PI (C) $\alpha = 0.15$ \\ \hline
+        total time & 39m 34,72s & 1h 14m 20,78s \\ \hline
+        algo time & $\approx$ 9m  & $\approx$ 44m \\ \hline
+
+    \end{tabular}
+    \caption{Speed Random walk and Power Iteration Method (nodes 0 - 50 million)}
+    \label{tab:random-timing}
+\end{table}
+Note that reading the inputfile and writing the output takes up the exactly the same amount of time for both algorithms and takes $\approx 30$m. This is how we calculated ``algo time''. The writing speed of the outputfile can still be improved, but this left as an exercise to the reader.
+
+\subsection{Disadvantages}
+The algorithm makes use of randomness, this means that the results for different runs will always slightly differ. This is especially pronounced in small datasets, where only a few ``walks'' get executed. The highest ranking nodes will still have a small number of links pointing to them. A node can get a worse pagerank position even if only a single walk is terminated early or the walk decides to ignore the node a few times. 
+In our testing we also noticed that an iteration of random walk takes approximately 10 seconds longer than an iteration in the power iteration implementation (with the Google dataset). However, this will vary depending on the dataset size and structure. Random walk will be faster in graphs that have short ``paths'', as that will force the ``walk'' to complete.
+
+\section{Program Usage}
+For simplicity, create a folder named ``data'' in the root of the git repo and add the datasets in that folder. 
+\subsection{PySpark}
+Make sure you have the following installed: Spark, java. 
+Also make sure you have the following python packages installed: pyspark, findspark
+\\\\
+To run the big dataset (not recommended).
+First, prepare the dataset by adding line numbers and removing empty nodes.
+\begin{lstlisting}[language=sh]
+awk 'BEGIN{i=-1} /.*/{printf "%d.%s\n",i,$0; i++}' ClueWeb09_WG_50m.graph-txt 
+> ClueWeb09_WG_50m_numbered.graph-txt 
+sed -r --in-place 's/[0-9]*\.$//g' ClueWeb09_WG_50m_numbered.graph-txt 
+sed -i '/^$/d' ClueWeb09_WG_50m_numbered.graph-txt
+\end{lstlisting}
+Then run the python script.
+\begin{lstlisting}[language=sh]
+cd pyspark
+python3 pagerank.py
+\end{lstlisting}
+variables like $\alpha$, $\epsilon$, input- and outputfiles can be changed by editing the variables at the top of pagerank.py.
+\\\\
+To run the google dataset, run
+\begin{lstlisting}[language=sh]
+cd pyspark/google-graph
+python3 google-ranking.py
+\end{lstlisting}
+variables like $\alpha$, $\epsilon$, input- and outputfiles can be changed by editing the variables at the top of google-ranking.py.
+The two optimazations attemps are run in the same way. A new directory will be created containing the sorted csv file. Make sure this directory does not already exists, the program refuses to overwrite already written output.
+The output csv file is sorted on decreasing pagerank.
+
+\subsection{C++}
+The source code can be found in \textit{./c++}. Compile main.cpp and run the binary with the following cli arguments
+\begin{lstlisting}[language=sh]
+cd c++
+g++ main.cpp
+./a.out help    # gives cli explanation
+./a.out inputfile format outputfile algorithm [alpha] [iterations]
+\end{lstlisting}
+inputfile: path to web graph file e.g. \textit{../data/ClueWeb09\_WG\_50m.graph-txt} \\
+format: graph-txt or google \\
+outputfile: path to outputfile e.g. \textit{out-power-0.15.csv}\\
+algorithm: power or random (optional, default = power)\\
+alpha: 0.0 - 1.0 (optional, default = 0.15)\\
+iterations: max amount of iterations to run (optional, default = $-1$ (unlimited))
+
+The csv file output of the C++ program is sorted on node id. To sort by pagerank use the following command on the outputted csv file.
+\begin{lstlisting}[language=sh]
+sort --field-separator=';' --reverse --key=2,2 -g out-power-0.15.csv 
+> out-power-0.15-sorted.csv
+\end{lstlisting}
+
+\section{Conclusion}
+If we only care about the top results, e.g. for ranking search results, a single iteration of random walk will be sufficient. However if there is a need to correctly rank nodes with few links associated to them or for smaller webgraphs, the power iteration method will be faster and more accurate. The values for $\alpha$ and $\epsilon$ will indirectly determine the accuracy of the positions of your pages. So choose them wisely.
+
+\nocite{*} 
+\printbibliography
+
+\appendix
+\section{Appendix}
+\subsection{Attached files}
+In the github release, you will find the pageranks computed with the C++ algorithms. We use the following naming scheme:
+dataset-algo-alpha(-max\_iteration). For example:
+google-random-0.15-1.csv is the pagerank of the google dataset computed using one iteration of random walk and $\alpha = 0.15$
+
+\begin{itemize}
+    \item Datasets
+    \begin{itemize}
+        \item full: The complete ClueWeb dataset
+        \item partial: Nodes 0 - 50 million of the ClueWeb dataset
+        \item google: The google dataset
+    \end{itemize}
+    \item Algorithms: power or random
+\end{itemize}
+\pagebreak
+\subsection{C++ Algorithms}
+
+\RestyleAlgo{boxruled}
+\LinesNumbered
+\begin{algorithm}[h]
+  \caption{Power Iteration\label{algC++}}
+  int \textbf{Iterate}(ranks, links) \\ \Indp
+  map\textless int32\_t, double\textgreater new\_ranks; \\
+  // Calculate chance to jump from page to page \\
+  \For{it = links.begin(); it != links.end(); it++}{ 
+    vector\textless int32\_t\textgreater out = it-\textgreater second;\\
+    \For{v\_it = out.begin(); v\_it != out.end(); v\_it++}{
+        new\_ranks[*v\_it] += $\beta$ * ranks[it-\textgreater first] / out.size(); \\
+    }
+  }
+  // Add random chance to jump to this page and Calculate max error \\
+  int error = 0; \\
+  \For{it = ranks.begin(); it != ranks.end(); it++}{
+    new\_ranks[it-\textgreater first] += base\_rank; \\
+    error = max(error, abs(ranks[it-\textgreater first] - new\_ranks[it-\textgreater first])); \\
+  } 
+  // Update ranks to the new values\\
+  ranks = new\_ranks;\\
+  return error;
+\end{algorithm}
+
+\RestyleAlgo{boxruled}
+\LinesNumbered
+\begin{algorithm}[h]
+  \caption{Power Iteration Method\label{algC++}}
+    map\textless int32\_t, double\textgreater ranks; \\
+    map\textless int32\_t, vector\textless int32\_t\textgreater\textgreater links; \\
+    readfile(file, ranks, links); // Initialize links, ranks  \\
+    double error = 1;\\
+    \While {error $< \epsilon$} {
+        error = iterate(ranks, links); \\
+    }
+    
+\end{algorithm}
+
+\RestyleAlgo{boxruled}
+\LinesNumbered
+\begin{algorithm}[ht]
+  \caption{Random walk iteration\label{random-walk-iter}}
+  \textbf{random\_walk}(ranks, links, current\_iteration) \\ \Indp
+  int total\_visits = 0; \\
+  map\textless int, double\textgreater visits; \\
+  \For{link in links}{
+    bool first = true;\\
+    int current = link.source; \\
+    \While{true}{
+        \eIf{!first}{
+            visits[current] += 1; \\
+            total\_visits += 1; \\
+        } {first = false;} 
+        double r = random();  // [0.0, 1.0[\\
+        \eIf{r  $< \alpha$ or current.degree == 0}{break;}{
+            // Choose random node out of outgoing links \\
+            r = (r - $\alpha$) * 1.0 / (1 - $\alpha$) * current.degree; \\ 
+            current = links[current][(int)r];
+        }
+    }
+  }
+  total\_visits $ +$= ranks.size();\\
+  double error = 0; \\
+    \For{rank in ranks}{
+        // Compute distribution \\
+        visits[rank.key] = visits[rank.key]) / (double)total\_visits; \\
+        \eIf{current\_iteration $ > 0$}{
+            visits[rank.key] = (rank.value * current\_iteration $+$ visits[rank.key]) / (double)(current\_iteration + 1); \\
+        }{}
+        error = max(error, abs(visits[rank.key] - rank.value));\\
+    }
+    ranks = visits;
+\end{algorithm}
+
+
+\end{document}
+
+
+% Iteration 0 with error 1
+% Iteration 1 with error 0.0012783562990714404                                    
+% Iteration 2 with error 0.0006503654092605331                                    
+% Iteration 3 with error 0.0005528164763902819                                    
+% Iteration 4 with error 0.00020954793813669184                                   
+% Iteration 5 with error 0.00015317532624931017                                   
+% Iteration 6 with error 0.00013020872666163254                                   
+% Iteration 7 with error 0.00011069301668839782                                   
+% Iteration 8 with error 9.409396763282048e-05                                    
+% Iteration 9 with error 7.998831049394823e-05                                    
+% Iteration 10 with error 6.799241976706515e-05                                   
+% Iteration 11 with error 5.779693103887763e-05                                   
+% Iteration 12 with error 4.9128403473675295e-05                                  
+% Iteration 13 with error 4.1759853122903774e-05                                  
+% Iteration 14 with error 3.5496253615103704e-05                                  
+% Iteration 15 with error 3.0171485289867868e-05                                  
+% Iteration 16 with error 2.5645846911397595e-05                                  
+% Iteration 17 with error 2.1798281556749714e-05                                  
+% Iteration 18 with error 1.8528499921620617e-05
+% Iteration 19 with error 1.5748498000872743e-05                                  
+% Iteration 20 with error 1.3386143142194302e-05                                  
+% Iteration 21 with error 1.1377587816192093e-05                                  
+% Iteration 22 with error 9.670865361714477e-06                                   
+% Iteration 23 with error 8.219726036513445e-06                                   
+% Iteration 24 with error 6.986693266065462e-06                                   
+% Iteration 25 with error 5.938299993779963e-06                                   
+% Iteration 26 with error 5.0474957075722065e-06                                  
+% Iteration 27 with error 4.29008410330852e-06                                    
+% Iteration 28 with error 3.6465262037337965e-06                                  
+% Iteration 29 with error 3.0993397820686162e-06                                  
+% Iteration 30 with error 2.6344053257200384e-06                                  
+% Iteration 31 with error 2.2390971296632704e-06                                  
+% Iteration 32 with error 1.9032083582608598e-06                                  
+% Iteration 33 with error 1.6176237798946349e-06                                  
+% Iteration 34 with error 1.374963006020119e-06                                   
+% Iteration 35 with error 1.1686467868236297e-06                                  
+% [('597621', 0.0006444618894069848), ('41909', 0.0006426792137239911), ('163075', 0.0006306785781876295), ('537039', 0.0006270892620906745), ('384666', 0.0005490207465715136), ('504140', 0.0005338097044755172), ('486980', 0.0005057478661616668), ('605856', 0.000500869250729035), ('32163', 0.0004971413452908371), ('558791', 0.0004947662890231497)]
+% python3.7 google-ranking.py  5.16s user 1.82s system 0\% cpu 34:30.03 total    
+
+% run with no outgoing nodes removed on laptop
+% Iteration 0 with error 0.0012783562990714412                                    
+% Iteration 1 with error 0.0006503654092605307                                    
+% Iteration 2 with error 0.0005528164763902806                                    
+% Iteration 3 with error 0.00020954793813669163                                   
+% Iteration 4 with error 0.0001531753262493103                                    
+% Iteration 5 with error 0.00013020872666163265                                   
+% Iteration 6 with error 0.00011069301668839789                                   
+% Iteration 7 with error 9.40939676328205e-05                                     
+% Iteration 8 with error 7.998831049394828e-05                                    
+% Iteration 9 with error 6.79924197670652e-05                                     
+% Iteration 10 with error 5.779693103887779e-05                                   
+% Iteration 11 with error 4.912840347367546e-05                                   
+% Iteration 12 with error 4.175985312290399e-05                                   
+% Iteration 13 with error 3.5496253615103894e-05                                  
+% Iteration 14 with error 3.0171485289867895e-05                                  
+% Iteration 15 with error 2.5645846911397595e-05                                  
+% Iteration 16 with error 2.179828155674955e-05                                   
+% Iteration 17 with error 1.852849992162048e-05                                   
+% Iteration 18 with error 1.574849800087269e-05                                   
+% Iteration 19 with error 1.3386143142194275e-05                                  
+% Iteration 20 with error 1.1377587816191768e-05                                  
+% Iteration 21 with error 9.670865361714206e-06                                   
+% Iteration 22 with error 8.219726036513147e-06                                   
+% Iteration 23 with error 6.9866932660652185e-06                                  
+% Iteration 24 with error 5.938299993779285e-06                                   
+% Iteration 25 with error 5.047495707571637e-06                                   
+% Iteration 26 with error 4.290084103308168e-06                                   
+% Iteration 27 with error 3.6465262037334984e-06                                  
+% Iteration 28 with error 3.0993397820683723e-06                                  
+% Iteration 29 with error 2.6344053257198487e-06                                  
+% Iteration 30 with error 2.239097129663677e-06                                   
+% Iteration 31 with error 1.9032083582612121e-06                                  
+% Iteration 32 with error 1.6176237798950957e-06                                  
+% Iteration 33 with error 1.3749630060204984e-06                                  
+% Iteration 34 with error 1.168646786823982e-06                                   
+% Iteration 35 with error 9.933376857865553e-07                                   
+% python3.7 google-ranking-opt1.py  6.25s user 2.08s system 0\% cpu 44:57.49 total 
+
+% lander run on laptop
+% Iteration 0 with error 0.0009792309873623512                                    
+% Iteration 1 with error 0.00037920361229223324                                   
+% Iteration 2 with error 0.00025939469044710794                                   
+% Iteration 3 with error 0.00018984284026205266                                   
+% Iteration 4 with error 0.00016137008619323978                                   
+% Iteration 5 with error 0.00013717207641068504                                   
+% Iteration 6 with error 0.00011661526437003083                                   
+% Iteration 7 with error 9.912741751983559e-05                                    
+% Iteration 8 with error 8.427052667601736e-05                                    
+% Iteration 9 with error 7.163267511143822e-05                                    
+% Iteration 10 with error 6.089503631310906e-05                                   
+% Iteration 11 with error 5.176242679422027e-05                                   
+% Iteration 12 with error 4.4002386141385485e-05                                  
+% Iteration 13 with error 3.740300010807531e-05                                   
+% Iteration 14 with error 3.179510535028022e-05                                   
+% Iteration 15 with error 2.702640809667647e-05                                   
+% Iteration 16 with error 2.2973929856811475e-05                                  
+% Iteration 17 with error 1.9528171215696968e-05                                  
+% Iteration 18 with error 1.6599798831570616e-05                                  
+% Iteration 19 with error 1.4110021301051457e-05                                  
+% Iteration 20 with error 1.1994009371657022e-05                                  
+% Iteration 21 with error 1.019501924433866e-05                                   
+% Iteration 22 with error 8.66604553797251e-06                                    
+% Iteration 23 with error 7.366202775881098e-06                                   
+% Iteration 24 with error 6.261429524936072e-06                                   
+% Iteration 25 with error 5.322251864734243e-06                                   
+% Iteration 26 with error 4.524002172208593e-06                                   
+% Iteration 27 with error 3.845422813220485e-06                                   
+% Iteration 28 with error 3.2686579604144063e-06                                  
+% Iteration 29 with error 2.7783711293588456e-06                                  
+% Iteration 30 with error 2.3616418028384e-06                                     
+% Iteration 31 with error 2.0074021937880628e-06                                  
+% Iteration 32 with error 1.706305924699988e-06                                   
+% Iteration 33 with error 1.4503637339800097e-06                                  
+% Iteration 34 with error 1.2328164418601002e-06                                  
+% Iteration 35 with error 1.0478959983638606e-06                                  
+% Iteration 36 with error 8.907151968741357e-07                                   
+% [('597621', 0.0006443183620683784), ('41909', 0.0006425088357617161), ('163075', 0.0006305944988618222), ('537039', 0.0006269382162122652), ('384666', 0.0005488930241132691), ('504140', 0.0005337271760174649), ('486980', 0.0005057129621071674), ('605856', 0.0005008399779713541), ('32163', 0.0004970631083938707), ('558791', 0.0004947005528635179)]
+% python3.7 google-ranking-opt2.py  8.42s user 3.46s system 0\% cpu 45:50.74 total 
+
+
+% :( 
+% run with no outgoing nodes removed on my pc 
+% Iteration 0 with error 0.0012783562990714118                                    
+% Iteration 1 with error 0.0006503654092605216                                    
+% Iteration 2 with error 0.0005528164763902955                                    
+% Iteration 3 with error 0.00020954793813669447                                   
+% Iteration 4 with error 0.00015317532624930933                                   
+% Iteration 5 with error 0.00013020872666163184                                   
+% Iteration 6 with error 0.00011069301668839607                                   
+% Iteration 7 with error 9.409396763281897e-05                                    
+% Iteration 8 with error 7.998831049394457e-05                                    
+% Iteration 9 with error 6.799241976706203e-05                                    
+% Iteration 10 with error 5.779693103887611e-05                                   
+% Iteration 11 with error 4.912840347367402e-05                                   
+% Iteration 12 with error 4.175985312290331e-05                                   
+% Iteration 13 with error 3.5496253615103325e-05                                  
+% Iteration 14 with error 3.0171485289865726e-05                                  
+% Iteration 15 with error 2.5645846911395752e-05                                  
+% Iteration 16 with error 2.1798281556748765e-05                                  
+% Iteration 17 with error 1.852849992161983e-05                                   
+% Iteration 18 with error 1.5748498000872662e-05                                  
+% Iteration 19 with error 1.3386143142194248e-05                                  
+% Iteration 20 with error 1.1377587816190332e-05                                  
+% Iteration 21 with error 9.670865361712986e-06                                   
+% Iteration 22 with error 8.219726036511033e-06                                   
+% Iteration 23 with error 6.986693266063402e-06                                   
+% Iteration 24 with error 5.938299993777225e-06                                   
+% Iteration 25 with error 5.0474957075699026e-06                                  
+% Iteration 26 with error 4.290084103307897e-06                                   
+% Iteration 27 with error 3.6465262037332815e-06                                  
+% Iteration 28 with error 3.099339782067044e-06                                   
+% Iteration 29 with error 2.6344053257187103e-06                                  
+% Iteration 30 with error 2.2390971296632704e-06                                  
+% Iteration 31 with error 1.9032083582608598e-06                                  
+% Iteration 32 with error 1.617623779894147e-06                                   
+% Iteration 33 with error 1.3749630060196853e-06                                  
+% Iteration 34 with error 1.1686467868222202e-06                                  
+% Iteration 35 with error 9.933376857850916e-07                                   
+% python3 google-ranking.py  4,03s user 1,63s system 0\% cpu 33:35,51 total       
+
+% alpha 0.1 C++
+% File: ../data/web-Google.txt
+% Format: google:
+% File Out: out0.10.csv
+% Done Reading
+% Start Iteration 0
+% End Iteration 0 with error 0.00135355
+% Start Iteration 1
+% End Iteration 1 with error 0.000729129
+% Start Iteration 2
+% End Iteration 2 with error 0.000656223
+% Start Iteration 3
+% End Iteration 3 with error 0.000263377
+% Start Iteration 4
+% End Iteration 4 with error 0.000203848
+% Start Iteration 5
+% End Iteration 5 with error 0.000183477
+% Start Iteration 6
+% End Iteration 6 with error 0.000165153
+% Start Iteration 7
+% End Iteration 7 with error 0.000148645
+% Start Iteration 8
+% End Iteration 8 with error 0.000133795
+% Start Iteration 9
+% End Iteration 9 with error 0.000120419
+% Start Iteration 10
+% End Iteration 10 with error 0.000108384
+% Start Iteration 11
+% End Iteration 11 with error 9.75474e-05
+% Start Iteration 12
+% End Iteration 12 with error 8.77941e-05
+% Start Iteration 13
+% End Iteration 13 with error 7.90156e-05
+% Start Iteration 14
+% End Iteration 14 with error 7.11132e-05
+% Start Iteration 15
+% End Iteration 15 with error 6.40021e-05
+% Start Iteration 16
+% End Iteration 16 with error 5.76001e-05
+% Start Iteration 17
+% End Iteration 17 with error 5.184e-05
+% Start Iteration 18
+% End Iteration 18 with error 4.66538e-05
+% Start Iteration 19
+% End Iteration 19 with error 4.19882e-05
+% Start Iteration 20
+% End Iteration 20 with error 3.77873e-05
+% Start Iteration 21
+% End Iteration 21 with error 3.40082e-05
+% Start Iteration 22
+% End Iteration 22 with error 3.06055e-05
+% Start Iteration 23
+% End Iteration 23 with error 2.75447e-05
+% Start Iteration 24
+% End Iteration 24 with error 2.47886e-05
+% Start Iteration 25
+% End Iteration 25 with error 2.23095e-05
+% Start Iteration 26
+% End Iteration 26 with error 2.00772e-05
+% Start Iteration 27
+% End Iteration 27 with error 1.80692e-05
+% Start Iteration 28
+% End Iteration 28 with error 1.62612e-05
+% Start Iteration 29
+% End Iteration 29 with error 1.46349e-05
+% Start Iteration 30
+% End Iteration 30 with error 1.31706e-05
+% Start Iteration 31
+% End Iteration 31 with error 1.18533e-05
+% Start Iteration 32
+% End Iteration 32 with error 1.06673e-05
+% Start Iteration 33
+% End Iteration 33 with error 9.60048e-06
+% Start Iteration 34
+% End Iteration 34 with error 8.6399e-06
+% Start Iteration 35
+% End Iteration 35 with error 7.77582e-06
+% Start Iteration 36
+% End Iteration 36 with error 6.99782e-06
+% Start Iteration 37
+% End Iteration 37 with error 6.29797e-06
+% Start Iteration 38
+% End Iteration 38 with error 5.66786e-06
+% Start Iteration 39
+% End Iteration 39 with error 5.10101e-06
+% Start Iteration 40
+% End Iteration 40 with error 4.59067e-06
+% Start Iteration 41
+% End Iteration 41 with error 4.13156e-06
+% Start Iteration 42
+% End Iteration 42 with error 3.71822e-06
+% Start Iteration 43
+% End Iteration 43 with error 3.34637e-06
+% Start Iteration 44
+% End Iteration 44 with error 3.01159e-06
+% Start Iteration 45
+% End Iteration 45 with error 2.71041e-06
+% Start Iteration 46
+% End Iteration 46 with error 2.43926e-06
+% Start Iteration 47
+% End Iteration 47 with error 2.19531e-06
+% Start Iteration 48
+% End Iteration 48 with error 1.9757e-06
+% Start Iteration 49
+% End Iteration 49 with error 1.77812e-06
+% Start Iteration 50
+% End Iteration 50 with error 1.60025e-06
+% Start Iteration 51
+% End Iteration 51 with error 1.44021e-06
+% Start Iteration 52
+% End Iteration 52 with error 1.29615e-06
+% Start Iteration 53
+% End Iteration 53 with error 1.16652e-06
+% Start Iteration 54
+% End Iteration 54 with error 1.04984e-06
+% Start Iteration 55
+% End Iteration 55 with error 9.44847e-07
+% Convergence achieved
+% Writing file
+% ./a.out ../data/web-Google.txt google out0.10.csv  605,95s user 6,56s system 96% cpu 10:34,60 total
+
+% alpha 0.5 C++
+% File: ../data/web-Google.txt
+% Format: google
+% File Out: out0.50.csv
+% Done Reading
+% Start Iteration 0
+% End Iteration 0 with error 0.000751974
+% Start Iteration 1
+% End Iteration 1 with error 0.00022504
+% Start Iteration 2
+% End Iteration 2 with error 0.000112521
+% Start Iteration 3
+% End Iteration 3 with error 2.50893e-05
+% Start Iteration 4
+% End Iteration 4 with error 1.07881e-05
+% Start Iteration 5
+% End Iteration 5 with error 5.39444e-06
+% Start Iteration 6
+% End Iteration 6 with error 2.6976e-06
+% Start Iteration 7
+% End Iteration 7 with error 1.34887e-06
+% Start Iteration 8
+% End Iteration 8 with error 6.74507e-07
+% Convergence achieved
+% Writing file
+% ./a.out ../data/web-Google.txt google out0.50.csv  109,13s user 5,15s system 84% cpu 2:14,68 total
+
+% File: ../data/ClueWeb09_WG_50m.graph-txt
+% Format: graph-txt
+% File Out: power-big-0.15.csv
+% Algorithm: power
+% Alpha: 0.15
+% Done Reading
+% Total nodes: 39674938
+% Start Iteration 0
+% End Iteration 0 with error 0.000211453
+% Start Iteration 1
+% End Iteration 1 with error 0.000137107
+% Start Iteration 2
+% End Iteration 2 with error 2.50674e-05
+% Start Iteration 3
+% End Iteration 3 with error 6.08957e-06
+% Start Iteration 4
+% End Iteration 4 with error 1.82091e-06
+% Start Iteration 5
+% End Iteration 5 with error 6.66338e-07
+% Convergence achieved
+% Writing file
+% ./a.out ../data/ClueWeb09_WG_50m.graph-txt graph-txt power-big-0.15.csv power  3773,66s user 188,81s system 88% cpu 1:14:20,78 total
+
+% File: ../data/ClueWeb09_WG_50m.graph-txt
+% Format: graph-txt
+% File Out: random-big-0.15.csv
+% Algorithm: random
+% Alpha: 0.15
+% Done Reading
+% Total nodes: 39674938
+% Start Iteration 0
+% End Iteration 0 with error 0.000216143
+% Start Iteration 1
+% End Iteration 1 with error 2.27792e-06
+% Start Iteration 2
+% End Iteration 2 with error 1.23124e-06
+% Start Iteration 3
+% End Iteration 3 with error 9.68904e-07
+% Convergence achieved
+% Writing file
+% ./a.out ../data/ClueWeb09_WG_50m.graph-txt graph-txt random-big-0.15.csv   1671,99s user 188,00s system 78% cpu 39:34,72 total
+
+
+% TOP TEN RANDOM 1
+% 3
+% 24
+% 6
+% 8
+% 12
+% 13
+% 18
+% 19
+% 7
+% 0
+
+% TOP TEN CONVERGED
+% 3
+% 24
+% 6
+% 8
+% 12
+% 13
+% 18
+% 7
+% 19
+% 0
+
+% BIGBIG random vs power
+% 23 - 26 shuffled
+% 32-33 switched
+% 35-36 switched
+% 37 - 39 shuffled
