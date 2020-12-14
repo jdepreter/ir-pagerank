@@ -11,8 +11,8 @@ Make sure you have the following installed:
 To run the big dataset (not recommended).
 First, prepare the dataset by adding line numbers and removing empty nodes.
 
-> awk 'BEGIN{i=-1} /.*/{printf "%d.%s\n",i,$0; i++}' ClueWeb09_WG_50m.graph-txt > ClueWeb09_WG_50m_numbered.graph-txt \
-> sed -r --in-place 's/[0-9]*\.$//g' ClueWeb09_WG_50m_numbered.graph-txt \
+> awk 'BEGIN{i=-1} /.\*/{printf "%d.%s\n",i,$0; i++}' ClueWeb09_WG_50m.graph-txt > ClueWeb09_WG_50m_numbered.graph-txt \
+> sed -r --in-place 's/[0-9]\*\.$//g' ClueWeb09_WG_50m_numbered.graph-txt \
 > sed -i '/^$/d' ClueWeb09_WG_50m_numbered.graph-txt
 
 Then run the python script.
