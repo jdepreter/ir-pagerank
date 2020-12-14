@@ -7,14 +7,23 @@ Make sure you have the following installed:
 - pyspark (pip)
 - findspark (pip)
 
-To run the big dataset (not recommended), run 
-> cd simple-pagerank \
+
+To run the big dataset (not recommended).
+First, prepare the dataset by adding line numbers and removing empty nodes.
+
+> awk 'BEGIN{i=-1} /.*/{printf "%d.%s\n",i,$0; i++}' ClueWeb09_WG_50m.graph-txt > ClueWeb09_WG_50m_numbered.graph-txt \
+> sed -r --in-place 's/[0-9]*\.$//g' ClueWeb09_WG_50m_numbered.graph-txt \
+> sed -i '/^$/d' ClueWeb09_WG_50m_numbered.graph-txt
+
+Then run the python script.
+
+> cd pyspark \
 > python3 pagerank.py 
 
 variables like α, ε, input- and outputfiles can be changed by editing the variables at the top of pagerank.py.
 
 To run the google dataset, run
-> cd simple-pagerank/google-graph \
+> cd pyspark/google-graph \
 > python3 google-ranking.py
 
 variables like α, ε, input- and outputfiles can be changed by editing the variables at the top of google-ranking.py.
